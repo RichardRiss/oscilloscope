@@ -6,7 +6,8 @@ import os
 import math
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-# Needed for GPIB interface
+
+# Needed for GPIB interface -> only for requirements.txt
 import psutil
 import pyvisa_py
 import zeroconf
