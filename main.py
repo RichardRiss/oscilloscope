@@ -156,18 +156,21 @@ cmd_error = {
 }
 
 class Device:
-    def __init__(self):
+    def __init__(self, ip: str, scale: float):
         # Init Device
         self.rm = pyvisa.ResourceManager('@py')
         self.device = None
         self.data = {}
         self.graph = None
+        assert len(ip) > 0
+        self.ip = ip
+        self.scale = str(scale)
         self.time_init = time.time()
         self.timestamp = 0
         self.value = 0
         while self.device is None:
             try:
-                self.device = self.rm.open_resource('TCPIP::192.168.178.3::INSTR')
+                self.device = self.rm.open_resource(f'TCPIP::{self.ip}::INSTR')
                 self.set_device(self.device)
 
             except:
@@ -197,8 +200,9 @@ class Device:
             self.graph.set_ylabel("V")
             self.graph.set_ylim(-10, 10)
             lists = sorted(self.data.items())
-            x,y = zip(*lists)
-            self.graph.plot(x,y)
+            if len(lists) > 0:
+                x,y = zip(*lists)
+                self.graph.plot(x,y)
 
         except:
             logging.error(f'{sys.exc_info()[1]}')
@@ -217,11 +221,11 @@ class Device:
             # set measurement as mean over one cycle
             dev.write('MEASUREMENT:IMMED:TYPE CME')
             # Scale Meas Channel
-            dev.write('CH1:SCALE 10.0')
+            dev.write(f'CH1:SCALE {self.scale}')
             # set termination string
             dev.read_termination = '\n'
             # Return all parameters for Meas
-            logging.info(dev.query('MEASUrement:IMMed?'))
+            logging.info(f'Starting with device settings: {dev.query("MEASUrement:IMMed?")}')
 
         except pyvisa.errors.VisaIOError:
             logging.error(f'{sys.exc_info()[1]}')
@@ -232,6 +236,9 @@ class Device:
 
 def init_logging():
   log_format = f"%(asctime)s [%(processName)s] [%(name)s] [%(levelname)s] %(message)s"
+  logging.getLogger('pyvisa').disabled = True
+  logging.getLogger('matplotlib.font_manager').disabled = True
+  logging.getLogger('matplotlib.pyplot').disabled = True
   log_level = logging.DEBUG
   if getattr(sys, 'frozen', False):
     folder = os.path.dirname(sys.executable)
@@ -253,7 +260,9 @@ def init_logging():
 def main():
     init_logging()
     # Create Device
-    dev = Device()
+    ip = "192.168.178.3"
+    scale = 10.0
+    dev = Device(ip, scale)
 
     # Init figure
     fig = plt.figure(figsize=(12, 6), facecolor='#DEDEDE')
