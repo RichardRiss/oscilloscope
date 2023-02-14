@@ -4,11 +4,12 @@ import time
 import logging
 import sys
 import os
-import math
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button
 from collections import OrderedDict
+import threading
+import pandas as pd
 
 # Needed for GPIB interface -> only for requirements.txt
 import psutil
@@ -36,23 +37,81 @@ dev.query("WFMPre:XINcr?")
 Abtastrate
 '''
 
+
+class Storage:
+    def __init__(self):
+        self.col = ('time','values')
+        self.values = pd.DataFrame(columns=self.col)
+        self.limit = 100000
+        self.init_time = time.time()
+        self.limit = True
+        self._ch1_scale = None
+        self._incr = None
+        self._graph_scale = None
+
+    @property
+    def ch1_scale(self):
+        return self._ch1_scale
+
+    @ch1_scale.setter
+    def ch1_scale(self, value):
+        self._ch1_scale = value
+
+    @property
+    def incr(self):
+        return self._incr
+
+    @incr.setter
+    def incr(self, value):
+        self._incr = value
+
+    @property
+    def graph_scale(self):
+        return self._graph_scale
+
+    @graph_scale.setter
+    def graph_scale(self, value):
+        self._graph_scale = value
+
+
+    def read(self):
+        return self.values
+
+    def write(self, tme: time.time, v:list):
+        try:
+            v = [((val * 10) / 65535) * self.ch1_scale for val in v]
+            t = [round(tme - (ts * self.incr) - self.init_time, 7) for ts in reversed(range(len(v)))]
+            df = pd.DataFrame(data={self.col[0]:t, self.col[1]:v})
+            df = df.query(f'{-self.graph_scale} < {self.col[1]} < {self.graph_scale}')
+            self.values = pd.concat([self.values, df], ignore_index=True)
+            self.values.reset_index(drop=True)
+            if self.limit:
+                self.values = self.values[-self.limit:]
+
+        except:
+            logging.error(f'{sys.exc_info()[1]}')
+            logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
+
+
+    def limited(self,event):
+        self.limit = not self.limit
+
+    def reset(self, event):
+        self.values = self.values.iloc[0:0]
+        self.init_time = time.time()
+
+
 class Device:
-    def __init__(self, ip: str, graph_scale: float, ch1_scale: int):
+    def __init__(self, ip: str, ch1_scale: int):
         # Init Device
-        self.rm = pyvisa.ResourceManager() #'@py'
+        self.ch1_scale = ch1_scale
+        self.incr = None
+        self.rm = pyvisa.ResourceManager('@py') #'@py'
         self.device = None
-        self.data = {}
         self.graph = None
         self.limit = True
         assert len(ip) > 0
         self.ip = ip
-        self.ch1_scale = ch1_scale
-        self.graph_scale = graph_scale
-        self.time_init = time.time()
-        self.timestamp = None
-        self.incr = None
-        self.values = None
-        self.dictValues = OrderedDict()
         while self.device is None:
             try:
                 self.device = self.rm.open_resource(f'TCPIP::{self.ip}::INSTR')
@@ -64,43 +123,6 @@ class Device:
                 logging.error(f'{sys.exc_info()[1]}')
                 logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
 
-
-
-    def set_plot(self, graph: plt.subplot):
-        self.graph = graph
-
-    def measurement(self, interval):
-        try:
-            # Get Data
-            self.values = self.device.query_binary_values('CURVE?','h', True)
-            timestamp = time.time()
-            cnt = len(self.values)
-            if self.limit and len(self.dictValues) + cnt > 100000:
-                for i in range(10000):
-                    self.dictValues.popitem(last=False)
-            meas = {round(timestamp - ((cnt-enum)*self.incr) - self.time_init,7) : ((val*10)/65535) * self.ch1_scale for enum, val in enumerate(self.values) if -self.graph_scale <= ((val*10)/65535) * self.ch1_scale <= self.graph_scale}
-            self.dictValues.update(meas)
-            self.dictValues = OrderedDict(sorted(self.dictValues.items()))
-            # Update plot
-            self.graph: plt.Subplot
-            self.graph.cla()
-            self.graph.set_xlabel("s")
-            self.graph.set_ylabel("V", rotation=0)
-            self.graph.set_ylim(-self.graph_scale, self.graph_scale)
-            if len(self.dictValues) > 0:
-                self.graph.plot(self.dictValues.keys(),self.dictValues.values())
-                self.graph.grid()
-
-        except:
-            logging.error(f'{sys.exc_info()[1]}')
-            logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
-
-    def limited(self,event):
-        self.limit = not self.limit
-
-    def reset(self, event):
-        self.dictValues.clear()
-        self.time_init = time.time()
 
 
     def set_device(self, dev: pyvisa.resources.resource):
@@ -117,20 +139,54 @@ class Device:
             dev.write(f'CH1:SCALE {self.ch1_scale}')
             # set termination string
             dev.read_termination = '\n'
-            # set Mode to RIBinary (Width 2 = signed int)
-            dev.write('DATa:ENCdg RIBINARY')
-            dev.write('DATa:WIDth 2')
             dev.write("HORIZONTAL:MAIN:SCALE 1.0E-1")
             # get increments
             self.incr = float(dev.query("WFMPre:XINcr?"))
-            # Return all parameters for Meas
-            logging.info(f'Starting with device settings: {dev.query("MEASUrement:IMMed?")}')
+            # set Mode to RIBinary (Width 2 = signed int)
+            dev.write('DATa:ENCdg RIBINARY')
+            dev.write('DATa:WIDth 2')
 
         except pyvisa.errors.VisaIOError:
             logging.error(f'{sys.exc_info()[1]}')
             logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
             dev.close()
+            raise pyvisa.errors.VisaIOError
 
+
+
+
+def animate(frame:int, graph_max:int, ax:matplotlib.pyplot.Axes, storage: Storage):
+    try:
+        # Get Data from Storage
+        values = storage.read()
+
+        # Update plot
+        ax.cla()
+        ax.set_xlabel("s")
+        ax.set_ylabel("V", rotation=0)
+        ax.set_ylim(-graph_max, graph_max)
+        ax.grid()
+
+        if len(values) > 0:
+            ax.plot(values['time'], values['values'])
+
+
+    except:
+        logging.error(f'{sys.exc_info()[1]}')
+        logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
+
+
+def pull_data(device:pyvisa.resources.resource, storage: Storage):
+    while True:
+        try:
+            # Get Data
+            values = device.query_binary_values('CURVE?','h', True)
+            timestamp = time.time()
+            storage.write(timestamp, values)
+
+        except:
+            logging.error(f'{sys.exc_info()[1]}')
+            logging.error(f'Error on line {sys.exc_info()[-1].tb_lineno}')
 
 
 def init_logging():
@@ -163,26 +219,33 @@ def main():
     graph_max = 11.0
     ch1_scale = 5
     interval = 100
-    dev = Device(ip, graph_max, ch1_scale)
+    dev = Device(ip, ch1_scale)
 
     # Init figure
     fig = plt.figure(figsize=(12, 6), facecolor='#DEDEDE')
     ax = plt.subplot(111)
     ax.set_facecolor('#DEDEDE')
-    dev.set_plot(ax)
+
+
+    # Data fetch Thread
+    storage = Storage()
+    storage.ch1_scale = ch1_scale
+    storage.incr = dev.incr
+    storage.graph_scale = graph_max
+    thr_data = threading.Thread(target = pull_data, args = (dev.device,storage), daemon = True)
+    thr_data.start()
 
     # Create Reset Button
     button_pos_reset = fig.add_axes([0.81, 0.9, 0.1, 0.075])
     button_reset = Button(button_pos_reset, 'Reset')
-    button_reset.on_clicked(dev.reset)
+    button_reset.on_clicked(storage.reset)
 
     # Create Limit Button
     button_pos_limit = fig.add_axes([0.71, 0.9, 0.1, 0.075])
     button_limit = Button(button_pos_limit, 'Limit')
-    button_limit.on_clicked(dev.limited)
+    button_limit.on_clicked(storage.limited)
 
-
-    ani = FuncAnimation(fig, dev.measurement, interval=interval)
+    ani = FuncAnimation(fig, animate, interval=interval, fargs=(graph_max,ax,storage), cache_frame_data=False)
     plt.show()
 
 # Press the green button in the gutter to run the script.

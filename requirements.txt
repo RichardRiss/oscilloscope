@@ -2,3 +2,4 @@ PyVISA~=1.13.0
 matplotlib~=3.6.3
 psutil~=5.9.4
 zeroconf~=0.47.1
+pandas~=1.4.4
